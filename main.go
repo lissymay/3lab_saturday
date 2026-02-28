@@ -133,22 +133,23 @@ func main() {
 		fmt.Printf("ID: %d, Модель: %s, Компания: %s, Цена: %d\n", p.id, p.model, p.company, p.price)
 	}
 
-	fmt.Println("\n--- Товар с ID = 1 ---")
-	prod, err := getProductByID(db, 1)
+	productID := int(lastID)
+	fmt.Printf("\n--- Товар с ID = %d ---\n", productID)
+	prod, err := getProductByID(db, productID)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Printf("ID: %d, Модель: %s, Компания: %s, Цена: %d\n", prod.id, prod.model, prod.company, prod.price)
 
-	fmt.Println("\n--- Обновление данных (цена товара с ID = 1) ---")
-	rowsAffected, err = updateProductPrice(db, 1, 69000)
+	fmt.Printf("\n--- Обновление данных (цена товара с ID = %d) ---\n", productID)
+	rowsAffected, err = updateProductPrice(db, productID, 69000)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Printf("Обновлено строк: %d\n", rowsAffected)
 
-	fmt.Println("\n--- Удаление данных (товар с ID = 1) ---")
-	rowsAffected, err = deleteProduct(db, 1)
+	fmt.Printf("\n--- Удаление данных (товар с ID = %d) ---\n", productID)
+	rowsAffected, err = deleteProduct(db, productID)
 	if err != nil {
 		panic(err)
 	}
