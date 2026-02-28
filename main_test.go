@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"os"
+	"strings"
+	"sync"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -29,6 +33,20 @@ func TestCreateProductsTable(t *testing.T) {
 	_, err = db.Exec("INSERT INTO products (model, company, price) VALUES (?, ?, ?)", "Test", "TestCo", 1000)
 	if err != nil {
 		t.Fatalf("вставка в созданную таблицу: %v", err)
+	}
+}
+
+func TestCreateProductsTable_Error(t *testing.T) {
+	// Создаём некорректное соединение (не существующая БД)
+	db, err := sql.Open("sqlite", "invalid://path")
+	if err != nil {
+		t.Skipf("не удалось создать БД для теста ошибки: %v", err) // Исправлено: Skip → Skipf
+	}
+	defer db.Close()
+
+	err = createProductsTable(db)
+	if err == nil {
+		t.Fatal("ожидали ошибку при создании таблицы, но её не было")
 	}
 }
 
@@ -60,6 +78,27 @@ func TestInsertProduct(t *testing.T) {
 	}
 }
 
+func TestInsertProduct_Error(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	// Таблица не создана — должна быть ошибка
+	_, _, err := insertProduct(db, "Test", "TestCo", 1000)
+	if err == nil {
+		t.Fatal("ожидали ошибку вставки в несуществующую таблицу")
+	}
+
+	// Создаём таблицу и тестируем некорректную цену (отрицательная)
+	if err := createProductsTable(db); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = insertProduct(db, "Test", "TestCo", -100)
+	// В текущей реализации отрицательная цена допустима, но тест показывает, как проверять граничные случаи
+	if err != nil {
+		t.Logf("получили ошибку при отрицательной цене: %v (в текущей реализации это допустимо)", err)
+	}
+}
+
 func TestGetAllProducts(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
@@ -86,6 +125,16 @@ func TestGetAllProducts(t *testing.T) {
 	}
 }
 
+func TestGetAllProducts_Error(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	// Таблица не создана
+	_, err := getAllProducts(db)
+	if err == nil {
+		t.Fatal("ожидали ошибку чтения из несуществующей таблицы")
+	}
+}
+
 func TestGetProductsByMinPrice(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
@@ -97,25 +146,48 @@ func TestGetProductsByMinPrice(t *testing.T) {
 	_, _, _ = insertProduct(db, "Galaxy S21", "Samsung", 65000)
 	_, _, _ = insertProduct(db, "Pixel 6", "Google", 55000)
 
-	// Цена > 60000: только iPhone X и Galaxy S21
+	// Цена > 60 000: только iPhone X и Galaxy S21
 	expensive, err := getProductsByMinPrice(db, 60000)
 	if err != nil {
 		t.Fatalf("getProductsByMinPrice: %v", err)
 	}
 	if len(expensive) != 2 {
-		t.Errorf("ожидали 2 товара с ценой > 60000, получили %d", len(expensive))
+		t.Errorf("ожидали 2 товара с ценой > 60 000, получили %d", len(expensive))
 	}
 
-	// Цена > 70000: только iPhone X
+	// Цена > 70 000: только iPhone X
 	veryExpensive, err := getProductsByMinPrice(db, 70000)
 	if err != nil {
 		t.Fatalf("getProductsByMinPrice(70000): %v", err)
 	}
 	if len(veryExpensive) != 1 {
-		t.Errorf("ожидали 1 товар с ценой > 70000, получили %d", len(veryExpensive))
+		t.Errorf("ожидали 1 товар с ценой > 70 000, получили %d", len(veryExpensive))
 	}
 	if veryExpensive[0].model != "iPhone X" {
 		t.Errorf("ожидали модель iPhone X, получили %s", veryExpensive[0].model)
+	}
+
+	// Тест с пустой таблицей — создаём новую БД без записей
+	emptyDB := openTestDB(t)
+	defer emptyDB.Close()
+	if err := createProductsTable(emptyDB); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := getProductsByMinPrice(emptyDB, 50000)
+	if err != nil {
+		t.Fatalf("getProductsByMinPrice для пустой таблицы: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("для пустой таблицы ожидали 0 товаров, получили %d", len(empty))
+	}
+
+	// Тест с нулевой ценой
+	zeroPrice, err := getProductsByMinPrice(db, 0)
+	if err != nil {
+		t.Fatalf("getProductsByMinPrice с minPrice=0: %v", err)
+	}
+	if len(zeroPrice) != 3 {
+		t.Errorf("с minPrice=0 ожидали все товары (3), получили %d", len(zeroPrice))
 	}
 }
 
@@ -145,9 +217,25 @@ func TestGetProductByID(t *testing.T) {
 		t.Errorf("ожидали Galaxy S21, получили %s", prod2.model)
 	}
 
+	// Несуществующий ID
 	_, err = getProductByID(db, 999)
 	if err != sql.ErrNoRows {
 		t.Errorf("ожидали sql.ErrNoRows для несуществующего ID, получили %v", err)
+	}
+}
+
+func TestGetProductByID_Error(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := createProductsTable(db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Закрываем соединение, чтобы вызвать ошибку БД
+	db.Close()
+	_, err := getProductByID(db, 1)
+	if err == nil {
+		t.Fatal("ожидали ошибку БД после закрытия соединения")
 	}
 }
 
@@ -171,6 +259,29 @@ func TestUpdateProductPrice(t *testing.T) {
 	prod, _ := getProductByID(db, 1)
 	if prod.price != 69000 {
 		t.Errorf("ожидали цену 69000, получили %d", prod.price)
+	}
+}
+
+func TestUpdateProductPrice_Error(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	// Таблица не создана
+	_, err := updateProductPrice(db, 1, 50000)
+	if err == nil {
+		t.Fatal("ожидали ошибку обновления в несуществующей таблице")
+	}
+
+	// Создаём таблицу, но обновляем несуществующий ID
+	if err := createProductsTable(db); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := updateProductPrice(db, 999, 50000)
+	if err != nil {
+		t.Logf("получили ошибку при обновлении несуществующего ID: %v (это допустимо)", err)
+	}
+	if rows != 0 {
+		t.Errorf("ожидали 0 обновлённых строк для несуществующего ID, получили %d", rows)
 	}
 }
 
@@ -203,5 +314,86 @@ func TestDeleteProduct(t *testing.T) {
 	_, err = getProductByID(db, 1)
 	if err != sql.ErrNoRows {
 		t.Errorf("удалённый товар не должен находиться по ID: %v", err)
+	}
+}
+
+func TestDeleteProduct_Error(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	// Таблица не создана
+	_, err := deleteProduct(db, 1)
+	if err == nil {
+		t.Fatal("ожидали ошибку удаления из несуществующей таблицы")
+	}
+
+	// Создаём таблицу, но удаляем несуществующий ID
+	if err := createProductsTable(db); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := deleteProduct(db, 999)
+	if err != nil {
+		t.Logf("получили ошибку при удалении несуществующего ID: %v (это допустимо)", err)
+	}
+	if rows != 0 {
+		t.Errorf("ожидали 0 удалённых строк для несуществующего ID, получили %d", rows)
+	}
+}
+
+// Тест для функции main()
+func TestMain(t *testing.T) {
+	// Сохраняем оригинальные os.Stdout и os.Args
+	oldStdout := os.Stdout
+	oldArgs := os.Args
+
+	// Перехватываем вывод
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	// Имитируем аргументы командной строки
+	os.Args = []string{"program"}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	// Запускаем main в отдельной горутине, чтобы перехватить panic
+	done := make(chan bool)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Logf("main() завершился с panic: %v", r)
+			}
+			wg.Done()
+			done <- true
+		}()
+		main()
+	}()
+
+	// Ждём завершения горутины
+	wg.Wait()
+
+	// Закрываем запись, читаем вывод
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	// Восстанавливаем состояние
+	os.Stdout = oldStdout
+	os.Args = oldArgs
+	<-done
+
+	// Проверяем ключевые фразы в выводе
+	expected := []string{
+		"Таблица products готова к использованию",
+		"Добавлен товар с ID",
+		"Получение всех товаров",
+		"Товары с ценой > 70 000", // Неразрывный пробел после 70
+	}
+
+	for _, exp := range expected {
+		if !strings.Contains(output, exp) {
+			t.Errorf("в выводе main() отсутствует ожидаемая строка: %s", exp)
+		}
 	}
 }
